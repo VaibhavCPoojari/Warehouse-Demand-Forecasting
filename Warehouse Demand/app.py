@@ -60,6 +60,8 @@ with st.sidebar:
     date_range = st.date_input("Select Date Range", [df['date'].min(), df['date'].max()])
 
 # Apply Filters
+
+# Apply sidebar filters to get filtered_df
 filtered_df = df.copy()
 if store_filter != 'All':
     filtered_df = filtered_df[filtered_df['store_id'] == store_filter]
@@ -67,21 +69,19 @@ if product_filter != 'All':
     filtered_df = filtered_df[filtered_df['product_id'] == product_filter]
 filtered_df = filtered_df[(filtered_df['date'] >= pd.to_datetime(date_range[0])) & (filtered_df['date'] <= pd.to_datetime(date_range[1]))]
 
-# Predict Current
-dmatrix = xgb.DMatrix(filtered_df[required_features], feature_names=required_features)
-filtered_df['predicted_demand'] = model.predict(dmatrix)
-
-# Predict Future (next 30 days)
-st.subheader("🔮 Future Demand Forecast (Next 30 Days)")
+# --- Predict Future (next 30 days) for filtered selection ---
+from datetime import datetime
+today = pd.Timestamp(datetime.now().date())
 future_days = 30
-last_date = df['date'].max()
-future_dates = [last_date + timedelta(days=i) for i in range(1, future_days + 1)]
-latest_data = df.sort_values('date').groupby('product_id').tail(1)
-future_rows = []
+future_dates = [today + timedelta(days=i) for i in range(1, future_days + 1)]
 
+
+# Use the latest available data for each store/product combination in the filtered set
+latest_filtered = filtered_df.sort_values('date').groupby(['store_id', 'product_id']).tail(1)
+future_rows_filtered = []
 for date in future_dates:
-    for _, row in latest_data.iterrows():
-        future_rows.append({
+    for _, row in latest_filtered.iterrows():
+        row_dict = {
             'store_id': row['store_id'],
             'product_id': row['product_id'],
             'price': row['price'],
@@ -95,64 +95,90 @@ for date in future_dates:
             'lag_7': row['units_sold'],
             'rolling_mean_7': row['units_sold'],
             'date': date
-        })
+        }
+        # Add purchase_cost if it exists in the row
+        if 'purchase_cost' in row:
+            row_dict['purchase_cost'] = row['purchase_cost']
+        future_rows_filtered.append(row_dict)
+future_filtered_df = pd.DataFrame(future_rows_filtered)
+if not future_filtered_df.empty:
+    future_dmatrix_filtered = xgb.DMatrix(future_filtered_df[required_features], feature_names=required_features)
+    future_filtered_df['predicted_demand'] = model.predict(future_dmatrix_filtered)
 
-future_df = pd.DataFrame(future_rows)
-future_dmatrix = xgb.DMatrix(future_df[required_features], feature_names=required_features)
-future_df['predicted_demand'] = model.predict(future_dmatrix)
+# Predict Current (for historical data, not future)
+dmatrix = xgb.DMatrix(filtered_df[required_features], feature_names=required_features)
+filtered_df['predicted_demand'] = model.predict(dmatrix)
 
-fig_future, ax_future = plt.subplots(figsize=(12, 5))
-sns.lineplot(data=future_df, x='date', y='predicted_demand', marker='o', ax=ax_future)
-ax_future.set_title("Predicted Demand for Next 30 Days")
-ax_future.set_ylabel("Predicted Units")
-ax_future.set_xlabel("Date")
-ax_future.tick_params(axis='x', rotation=45)
-st.pyplot(fig_future)
+# Predict Future (next 30 days)
 
-st.download_button(
-    label="📥 Download Future Predictions",
-    data=future_df.to_csv(index=False),
-    file_name="future_demand_predictions.csv",
-    mime="text/csv"
-)
 
-st.subheader("📊 Predicted Demand Preview")
-st.dataframe(filtered_df[['store_id', 'product_id', 'date', 'predicted_demand']].head(20))
+st.subheader("🔮 Future Demand Forecast (Next 30 Days)")
+date_range_str = f"{future_dates[0].strftime('%Y-%m-%d')} to {future_dates[-1].strftime('%Y-%m-%d')}"
+if not future_filtered_df.empty:
+    fig_future, ax_future = plt.subplots(figsize=(12, 5))
+    sns.lineplot(data=future_filtered_df, x='date', y='predicted_demand', marker='o', ax=ax_future)
+    ax_future.set_title(f"Predicted Demand for Next 30 Days ({date_range_str})")
+    ax_future.set_ylabel("Predicted Units")
+    ax_future.set_xlabel("Date")
+    ax_future.tick_params(axis='x', rotation=45)
+    st.pyplot(fig_future)
 
-st.subheader("📈 Demand Prediction vs Actuals")
-if 'units_sold' in filtered_df.columns:
+    st.download_button(
+        label="📥 Download Future Predictions",
+        data=future_filtered_df.to_csv(index=False),
+        file_name=f"future_demand_predictions_{future_dates[0].strftime('%Y%m%d')}_{future_dates[-1].strftime('%Y%m%d')}.csv",
+        mime="text/csv"
+    )
+else:
+    st.warning("No data available for future prediction with current filters.")
+
+
+st.subheader("📊 Predicted Demand Preview (Next 30 Days)")
+if not future_filtered_df.empty:
+    st.dataframe(future_filtered_df[['store_id', 'product_id', 'date', 'predicted_demand']].head(20))
+else:
+    st.write("No future prediction data to preview.")
+
+
+st.subheader("📈 Future Demand Prediction Trend (Next 30 Days)")
+if not future_filtered_df.empty:
     fig, ax = plt.subplots(figsize=(12, 5))
-    sns.lineplot(data=filtered_df.head(100), x='date', y='units_sold', label='Actual', ax=ax)
-    sns.lineplot(data=filtered_df.head(100), x='date', y='predicted_demand', label='Predicted', ax=ax)
+    sns.lineplot(data=future_filtered_df, x='date', y='predicted_demand', label='Predicted', ax=ax)
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45)
-    ax.set_title("Actual vs Predicted Demand")
+    ax.set_title("Predicted Demand Trend (Next 30 Days)")
     st.pyplot(fig)
 else:
-    st.warning("'units_sold' column not found in dataset. Skipping comparison plot.")
+    st.warning("No future prediction data to plot.")
 
-st.subheader("📌 Summary Statistics")
-st.write(filtered_df['predicted_demand'].describe())
 
-if {'price', 'purchase_cost'}.issubset(filtered_df.columns):
-    filtered_df['predicted_profit'] = (filtered_df['price'] - filtered_df['purchase_cost']) * filtered_df['predicted_demand']
-    if not filtered_df['predicted_profit'].empty and filtered_df['predicted_profit'].max() > 0:
-        max_profit = filtered_df['predicted_profit'].max()
-        max_profit_row = filtered_df.loc[filtered_df['predicted_profit'].idxmax()]
+st.subheader("📌 Summary Statistics for Next 30 Days Prediction")
+if not future_filtered_df.empty:
+    st.write(future_filtered_df['predicted_demand'].describe())
+else:
+    st.write("No future prediction data for summary statistics.")
 
-        st.subheader("💰 Predicted Profit Summary")
-        st.metric(label="Total Predicted Profit", value=f"₹{filtered_df['predicted_profit'].sum():,.2f}")
+
+# Profit calculations for next 30 days prediction
+if {'price', 'purchase_cost'}.issubset(future_filtered_df.columns):
+    future_filtered_df['predicted_profit'] = (future_filtered_df['price'] - future_filtered_df['purchase_cost']) * future_filtered_df['predicted_demand']
+    if not future_filtered_df['predicted_profit'].empty and future_filtered_df['predicted_profit'].max() > 0:
+        max_profit = future_filtered_df['predicted_profit'].max()
+        max_profit_row = future_filtered_df.loc[future_filtered_df['predicted_profit'].idxmax()]
+
+        st.subheader("💰 Predicted Profit Summary (Next 30 Days)")
+        st.metric(label="Total Predicted Profit", value=f"₹{future_filtered_df['predicted_profit'].sum():,.2f}")
         st.metric(label="Maximum Profit (Single Entry)", value=f"₹{max_profit:,.2f}")
         st.write("Details:")
         st.write(max_profit_row[['store_id', 'product_id', 'date', 'predicted_demand', 'price', 'purchase_cost', 'predicted_profit']])
 
-        st.subheader("🏆 Top 10 Most Profitable Entries")
-        top_10 = filtered_df.sort_values(by="predicted_profit", ascending=False).head(10)
+        st.subheader("🏆 Top 10 Most Profitable Entries (Next 30 Days)")
+        top_10 = future_filtered_df.sort_values(by="predicted_profit", ascending=False).head(10)
         st.dataframe(top_10[['store_id', 'product_id', 'date', 'predicted_demand', 'price', 'purchase_cost', 'predicted_profit']])
 
-        st.subheader("📉 Predicted Profit Over Time")
+        st.subheader("📉 Predicted Profit Over Time (Next 30 Days)")
         fig2, ax2 = plt.subplots(figsize=(12, 5))
-        sns.lineplot(data=filtered_df.sort_values("date"), x="date", y="predicted_profit", ax=ax2)
-        ax2.set_title("Predicted Profit Trend")
+        sns.lineplot(data=future_filtered_df.sort_values("date"), x="date", y="predicted_profit", ax=ax2)
+        ax2.set_title("Predicted Profit Trend (Next 30 Days)")
         ax2.set_ylabel("Profit (₹)")
         ax2.set_xlabel("Date")
         st.pyplot(fig2)
